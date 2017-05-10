@@ -45,6 +45,7 @@ if __name__ == "__main__":
         for line in f.readlines():
             data.append(line.split())
     mat = np.array(data)
+    print(mat.shape)
     cor = auto_cor(mat[:,0].astype(np.int64))
     plt.subplot(2, 3, 1)
     plot_auto_cor(cor, xlim)

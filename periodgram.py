@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import scipy.signal as sig
+from scipy import fftpack
 from statsmodels.tsa import stattools
 
 def kth_auto_cor(data, k, N, mean):
@@ -34,6 +35,24 @@ def plot_auto_cor(cor, xlim):
     plt.xlim(0, xlim)
     plt.ylim(-1, 1)
 
+def fourier(x, L):
+    N = len(x)
+    w = np.pi / (L - 1)
+    print("N=", N, "w=", w)
+    fc = fs = []
+    for i in range(1, L+1):
+        cos = np.cos(w * (i - 1))
+        sin = np.sin(w * (i - 1))
+        t1 = 0
+        t2 = 0
+        for j in range(2, N+1)[::-1]:
+            t0 = 2 * cos * t1 - t2 + x[j-1]
+            t2 = t1
+            t1 = t0
+        fc.append(cos * t1 - t2 + x[0])
+        fs.append(sin * t1)
+    return fc, fs
+
 def calc_periodogram(acf):
     p = []
     N = len(acf)
@@ -44,7 +63,7 @@ def calc_periodogram(acf):
         an_1 = 1
         pj = acf[1] * cos
         for n in range(2, N):
-            # Gortzel method
+            # Goertzel method
             an = 2 * an_1 * cos - an_2
             cosn = an * cos - an_1
             pj += acf[n] * cosn
