@@ -32,19 +32,19 @@ def Levinson(C, N, maxm):
     for m in range(1, maxm + 1):
         parcor[m] = acovf[m]
         for j in range(1, m):
-            parcor[m] -= a[m-2,j-1] * acovf[m-j]
+            parcor[m] -= a[m-2][j-1] * acovf[m-j]
         parcor[m] /= sig2[m-1]
-        a[m-1,m-1] = parcor[m]
+        a[m-1][m-1] = parcor[m]
         for i in range(1, m):
-            a[m-1,i-1] = a[m-2,i-1] - a[m-1,m-1] * a[m-2,m-i-1]
-        sig2[m] = sig2[m-1] * (1 - a[m-1,m-1]**2)
+            a[m-1][i-1] = a[m-2][i-1] - a[m-1][m-1] * a[m-2][m-i-1]
+        sig2[m] = sig2[m-1] * (1 - a[m-1][m-1]**2)
         AIC = const + N * np.log(sig2[m]) + 2 * (m + 1)
         print("m=", m, "parcor=", parcor[m], "sig=", sig2[m], "AIC=", AIC)
         # AIC最小値を更新
         if AIC < AIC_min:
             AIC_min = AIC
             sig2_min = sig2[m]
-            arc_min = a[m-1,:m]
+            arc_min = a[m-1]
             mar = m
     return mar, arc_min, sig2_min, AIC_min
 
@@ -95,66 +95,58 @@ def make_ar_model(data, arc, m):
             for j in range(i, m):
                 s += arc[j] * data[n+i-j]
             x[n,i] = s
-    F = np.zeros((k,k))
+    F = np.zeros((ndata,k,k))
     for i in range(k-1):
-        F[i,0] = arc[i]
-        F[i,i+1] = 1
-    F[k-1,0] = arc[k-1]
-    G = np.zeros([k,1])
-    G[0,0] = 1
-    H = np.zeros([l,k])
-    H[0,0] = 1
+        F[:,i,0] = arc[i]
+        F[:,i,i+1] = 1
+    F[:,k-1,0] = arc[k-1]
+    G = np.zeros([ndata,k,1])
+    G[:,0,0] = 1
+    H = np.zeros([ndata,l,k])
+    H[:,0,0] = 1
     return x, F, G, H
 
-def kalman_filter(x, y, F, G, H, Q, R, x0, V0):
-    ndata = x.shape[0]
+def calman_filter(x, y, F, G, H, Q, R, xc0, V0):
     shape = x.shape
-    xc = np.zeros((ndata, ndata, shape[1]))
-    Vc = np.zeros((ndata, ndata, shape[1], shape[1]))
+    xc = np.zeros((shape[0],shape[0], shape[1]))
+    V = np.zeros((shape[0], shape[0], shape[1], shape[1]))
     xc[0,0,:] = x0
-    Vc[0,0,:,:] = V0
+    V[0,0,:,:] = V0
     E = np.identity(shape[1])
-    GQGT = G @ Q @ G.T
-    for n in range(1, ndata):
-        xc[n,n-1,:] = F @ xc[n-1,n-1,:]
-        Vc[n,n-1,:,:] = F @ Vc[n-1,n-1,:,:] @ F.T + GQGT
-        K = Vc[n,n-1,:,:] @ H.T @ linalg.inv(H @ Vc[n,n-1,:,:] @ H.T + R)
-        xc[n,n,:] = xc[n,n-1,:] + K @ (y[n,:] - H @ xc[n,n-1,:])
-        Vc[n,n,:,:] = (E - K @ H) @ Vc[n,n-1,:,:]
-    return xc, Vc
+    for n in range(1, shape[0]):
+        xc[n,n-1,:] = F[n,:,:] @ xc[n-1,n-1,:]
+        V[n,n-1,:,:] = F[n,:,:] @ V[n-1,n-1,:,:] @ np.transpose(F[n,:,:]) + \
+                G[n,:,:] @ Q[n,:,:] @ np.transpose(G[n,:,:])
+        Ht = np.transpose(H[n,:,:])
+        K = V[n,n-1,:,:] @ Ht @ \
+                linalg.inv(H[n,:,:] @ V[n,n-1,:,:] @ Ht + R[n,:,:])
+        xc[n,n,:] = xc[n,n-1,:] + K @ (y[n,:] - H[n,:,:] @ xc[n,n-1,:])
+        V[n,n,:,:] = (E - K @ H[n,:,:]) @ V[n,n-1,:,:]
+    return xc, V
 
-def predict(xc, Vc, F, G, H, Q, R, ndata, dim, p_len):
-    Vp = np.zeros([p_len+1, Vc.shape[2], Vc.shape[3]])
+def predict(xc, V, F, G, H, Q, R, ndata, dim, p_len):
+    Vp = np.zeros([p_len+1, V.shape[2], V.shape[3]])
     xp = np.zeros([p_len+1, xc.shape[2]])
     xp[0,:] = xc[ndata-1,ndata-1,:]
-    Vp[0,:,:] = Vc[ndata-1,ndata-1,:,:]
-    GQGT = G @ Q @ G.T
+    Vp[0,:,:] = V[ndata-1,ndata-1,:,:]
     for n in range(ndata, ndata + p_len):
-        xp[n-ndata+1,:] = F @ xp[n-ndata,:]
-        Vp[n-ndata+1,:,:] = F @ Vp[n-ndata,:,:] @ F.T + GQGT
+        xp[n-ndata+1,:] = F[ndata-1,:,:] @ xp[n-ndata,:]
+        Vp[n-ndata+1,:,:] = F[ndata-1,:,:] @ Vp[n-ndata,:,:] @ \
+                np.transpose(F[ndata-1,:,:]) + \
+                G[ndata-1,:,:] @ Q[ndata-1,:,:] @ \
+                np.transpose(G[0,:,:])
     yp = np.zeros([p_len+1, dim])
     dp = np.zeros([p_len+1, dim])
     for j in range(p_len+1):
-        yp[j,:] = H @ xp[j,:]
-        dp[j,:] = H @ Vp[j,:,:] @ H.T + R
+        yp[j,:] = H[0,:,:] @ xp[j,:]
+        dp[j,:] = H[0,:,:] @ Vp[j,:,:] @ np.transpose(H[0,:,:]) + R[0,:,:]
     return yp, dp
-
-def smooth(xc, Vc, F):
-    ndata = xc.shape[0]
-    A = np.zeros(F.shape)
-    for n in range(ndata - 1)[::-1]:
-        A = Vc[n,n,:,:] @ F.T @ linalg.inv(Vc[n+1,n,0,0])
-        xc[n,ndata-1,:] = xc[n,n,:] + A @ (xc[n+1,ndata-1,:] - xc[n+1,n,:])
-        Vc[n,ndata-1,:] = Vc[n,n,:,:] + \
-                A @ (Vc[n+1,ndata-1,:,:] - Vc[n+1,n,:,:]) @ A.T
-    return xc, Vc
-
 
 if __name__ == "__main__":
     plt.figure(1)
     plt.clf()
 
-    maxm = 25
+    maxm = 15
 
     # 太陽黒点数
     with open('blsallfood.txt', encoding='utf-8') as f:
@@ -162,7 +154,7 @@ if __name__ == "__main__":
     # データ数
     data_org = data
     N_org = len(data)
-    # data = data[:120]
+    data = data[:120]
     N = len(data)
     # 対数値に変換
     # data = np.log10(data)
@@ -178,26 +170,22 @@ if __name__ == "__main__":
     print("Levinson method")
     mar, arc_min, sig2_min, AIC_min = Levinson(acovf, N, maxm)
     print('Best model: m=', mar)
-    print('AR coefficiants:', arc_min)
     # スペクトル
     t, logp2 = calc_spectrum(400, arc_min, sig2_min)
     y_pre2 = calc_time_series(data, arc_min, N, mar)
 
     # kalman filter
-    data_trim = data[:120]
-    x, F, G, H = make_ar_model(data_trim, arc_min, mar)
-    Q = np.zeros((1,1))
-    Q[0,0] = sig2_min
-    R = np.zeros((1,1))
+    x, F, G, H = make_ar_model(data, arc_min, mar)
+    print(F.shape)
+    Q = np.zeros((N,1,1))
+    Q[:,0,0] = sig2_min
+    R = np.zeros((N,1,1))
     x0 = np.zeros(x.shape[1])
     V0 = np.zeros((x.shape[1], x.shape[1]))
-    y = np.zeros((data_trim.shape[0], 1))
-    y[:,0] = data_trim
-    xc, Vc = kalman_filter(x, y, F, G, H, Q, R, x0, V0)
-    yc, dp = predict(xc, Vc, F, G, H, Q, R, len(data_trim), 1, N - len(data_trim))
-    print(xc.shape, yc.shape)
-    print(yc)
-    xc, Vc = smooth(xc, Vc, F)
+    y = np.zeros((data.shape[0], 1))
+    y[:,0] = data
+    xc, V = calman_filter(x, y, F, G, H, Q, R, x0, V0)
+    yc, dp = predict(xc, V, F, G, H, Q, R, N, 1, N_org - N)
 
     # プロット
     plt.subplot(2,1,1)
@@ -209,12 +197,13 @@ if __name__ == "__main__":
     plt.subplot(2,1,2)
     plt.plot(t, y_pre2 + mean, label="Yule-Walker")
     plt.plot(t, data + mean, label="Data")
-    t = range(len(data_trim) - 1, len(data_trim) - 1 + len(yc))
-    plt.plot(t, data[len(data_trim)-1:N] + mean, "o", label="Data")
+    t = range(N-1, N-1 + len(yc))
+    plt.plot(t, data_org[N-1:N_org], "o", label="Data")
     plt.plot(t, yc + mean, label="prediction")
     plt.plot(t, yc + np.sqrt(dp) + mean)
     plt.plot(t, yc - np.sqrt(dp) + mean)
 
-    plt.legend(loc="lower left")
+
+    plt.legend(loc="upper left")
     plt.show()
 
