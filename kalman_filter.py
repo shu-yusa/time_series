@@ -83,7 +83,14 @@ def calc_time_series(data, arc, N, m):
         y_pre.append(yk)
     return y_pre
 
-def make_ar_model(data, arc, m):
+def make_ar_model(data, m, arc, sig2):
+    """
+    Represent AR model in a state space representation.
+    @param data data
+    @param m AR order
+    @param arc Auto-regressive coefficient
+    @param sig2 variance
+    """
     ndata = len(data)
     k = m
     l = 1
@@ -104,23 +111,35 @@ def make_ar_model(data, arc, m):
     G[0,0] = 1
     H = np.zeros([l,k])
     H[0,0] = 1
-    return x, F, G, H
+    Q = np.zeros((1,1))
+    Q[0,0] = sig2
+    R = np.zeros((l,l))
+    return x, F, G, H, Q, R
 
-def kalman_filter(x, y, F, G, H, Q, R, x0, V0):
+def kalman_filter(x, y, F, G, H, Q, R, x0, V0, missing=[], num_missed=[]):
     ndata = x.shape[0]
     shape = x.shape
     xc = np.zeros((ndata, ndata, shape[1]))
     Vc = np.zeros((ndata, ndata, shape[1], shape[1]))
     xc[0,0,:] = x0
     Vc[0,0,:,:] = V0
-    E = np.identity(shape[1])
     GQGT = G @ Q @ G.T
+    outlier_min = -1.0e30
+    outlier_max = 1.0e30
+    for i in range(len(missing)):
+        for k in range(num_missed[i]):
+            y[missing[i]:missing[i]+k,0] = outlier_min
     for n in range(1, ndata):
         xc[n,n-1,:] = F @ xc[n-1,n-1,:]
         Vc[n,n-1,:,:] = F @ Vc[n-1,n-1,:,:] @ F.T + GQGT
-        K = Vc[n,n-1,:,:] @ H.T @ linalg.inv(H @ Vc[n,n-1,:,:] @ H.T + R)
-        xc[n,n,:] = xc[n,n-1,:] + K @ (y[n,:] - H @ xc[n,n-1,:])
-        Vc[n,n,:,:] = (E - K @ H) @ Vc[n,n-1,:,:]
+        VHT = Vc[n,n-1,:,:] @ H.T
+        if y[n,0] > outlier_min and y[n,0] < outlier_max:
+            K = VHT @ linalg.inv(H @ VHT + R)
+            xc[n,n,:] = xc[n,n-1,:] + K @ (y[n,:] - H @ xc[n,n-1,:])
+            Vc[n,n,:,:] = Vc[n,n-1,:,:] - K @ VHT.T
+        else:
+            xc[n,n,:] = xc[n,n-1,:]
+            Vc[n,n,:,:] = Vc[n,n-1,:,:]
     return xc, Vc
 
 def predict(xc, Vc, F, G, H, Q, R, ndata, dim, p_len):
@@ -143,12 +162,17 @@ def smooth(xc, Vc, F):
     ndata = xc.shape[0]
     A = np.zeros(F.shape)
     for n in range(ndata - 1)[::-1]:
-        A = Vc[n,n,:,:] @ F.T @ linalg.inv(Vc[n+1,n,0,0])
+        A = Vc[n,n,:,:] @ F.T @ linalg.pinv(Vc[n+1,n,:,:])
         xc[n,ndata-1,:] = xc[n,n,:] + A @ (xc[n+1,ndata-1,:] - xc[n+1,n,:])
         Vc[n,ndata-1,:] = Vc[n,n,:,:] + \
                 A @ (Vc[n+1,ndata-1,:,:] - Vc[n+1,n,:,:]) @ A.T
     return xc, Vc
 
+def interpolate(xc, Vc, H, ndata, dim):
+    ym = np.zeros([ndata, dim])
+    for n in range(ndata):
+        ym[n,:] = H @ xc[n,ndata-1,:]
+    return ym
 
 if __name__ == "__main__":
     plt.figure(1)
@@ -185,19 +209,15 @@ if __name__ == "__main__":
 
     # kalman filter
     data_trim = data[:120]
-    x, F, G, H = make_ar_model(data_trim, arc_min, mar)
-    Q = np.zeros((1,1))
-    Q[0,0] = sig2_min
-    R = np.zeros((1,1))
+    x, F, G, H, Q, R = make_ar_model(data_trim, mar, arc_min, sig2_min)
     x0 = np.zeros(x.shape[1])
     V0 = np.zeros((x.shape[1], x.shape[1]))
     y = np.zeros((data_trim.shape[0], 1))
     y[:,0] = data_trim
-    xc, Vc = kalman_filter(x, y, F, G, H, Q, R, x0, V0)
+    xc, Vc = kalman_filter(x, y, F, G, H, Q, R, x0, V0, [41, 101], [30, 20])
     yc, dp = predict(xc, Vc, F, G, H, Q, R, len(data_trim), 1, N - len(data_trim))
-    print(xc.shape, yc.shape)
-    print(yc)
     xc, Vc = smooth(xc, Vc, F)
+    ym = interpolate(xc, Vc, H, len(data_trim), 1)
 
     # プロット
     plt.subplot(2,1,1)
@@ -207,8 +227,10 @@ if __name__ == "__main__":
     # 時系列計算
     t = range(N)
     plt.subplot(2,1,2)
-    plt.plot(t, y_pre2 + mean, label="Yule-Walker")
-    plt.plot(t, data + mean, label="Data")
+    # plt.plot(t, y_pre2 + mean, label="Yule-Walker")
+    t = range(len(data_trim))
+    plt.plot(t, data_trim + mean, label="Data")
+    plt.plot(t, ym + mean, label="interpolation")
     t = range(len(data_trim) - 1, len(data_trim) - 1 + len(yc))
     plt.plot(t, data[len(data_trim)-1:N] + mean, "o", label="Data")
     plt.plot(t, yc + mean, label="prediction")
