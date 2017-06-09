@@ -92,7 +92,9 @@ def make_ar_model(data, m, arc, sig2):
     @param sig2 variance
     """
     ndata = len(data)
+    # dimension of state x
     k = m
+    # dimension of noise observation of noise w
     l = 1
     x = np.zeros([ndata, k])
     for n in range(ndata):
@@ -115,6 +117,57 @@ def make_ar_model(data, m, arc, sig2):
     Q[0,0] = sig2
     R = np.zeros((l,l))
     return x, F, G, H, Q, R
+
+def calc_arma_initial(data, m, arc, l, bac, sig2, acovf):
+    """
+    Represent ARMA model in a state space representation.
+    @param data data
+    @param m AR order
+    @param arc Auto-regressive coefficient
+    @param l MA order
+    @param bac Moving-average coefficient
+    @param sig2 variance
+    @param acovf auto covariance function
+    """
+    ndata = len(data)
+    k = m
+    x0 = np.zeros(k)
+    V0 = np.zeros((k, k))
+    V0[0,0] = acovf[0]
+    g = np.zeros(l)
+    g[0] = 1
+    g[i] = - bac[i]
+    for j in range(i):
+        g[i] += arc[j] * g[i-j]
+
+    for i in range(1,k):
+        for j in range(i,m):
+            V0[0,i] += arc[j] * acovf[j+1-i]
+        for j in range(i-1, l):
+            V0[0,i] -= bac[j] * g[j+1-i]
+    for i in range(1, k):
+        for j in range(1, k):
+            tmp = 0
+            for p in range(i, m):
+                for q in range(j, m):
+                    tmp += arc[p] * arc[q] * acovf[q-j-p+i]
+                for q in range(j-1, l):
+                    tmp -= arc[p] * bac[q] * g[q-j-p+i]
+            V0[i,j] = tmp
+            tmp = 0
+            for p in range(i-1, l):
+                for q in range(j, m):
+                   tmp -= bac[p] * arc[q] * g[p-i-q+j]
+                tmp += bac[p] * bac[p+j-i] * sig2
+            V0[i,j] += tmp
+    return x0, V0
+
+def logLF(y, yc, dc, N):
+    l = N * np.log(2*np.pi)
+    for n in range(N):
+        l += np.log(dc[n]) + (y[n] - yc[n]) ** 2 / dc[n]
+    l *= - 0.5
+    return l
 
 def kalman_filter(x, y, F, G, H, Q, R, x0, V0, missing=[], num_missed=[]):
     ndata = x.shape[0]
@@ -192,21 +245,19 @@ if __name__ == "__main__":
     maxm = 25
 
     # 太陽黒点数
-    with open('blsallfood.txt', encoding='utf-8') as f:
+    with open('sunspot.txt', encoding='utf-8') as f:
         data = np.array([float(k) for k in f.readlines()])
     # データ数
-    data_org = data
-    N_org = len(data)
-    # data = data[:120]
     N = len(data)
     # 対数値に変換
-    # data = np.log10(data)
+    data = np.log10(data)
     # 平均を引く
-    mean = np.mean(data)
-    data = data - mean
+    data = data - np.mean(data)
     # 自己共分散関数
     acovf = stattools.acovf(data)
-    # acovf = acovf * (N - 1) / N
+
+    mar, arc_min, sig2_min, AIC_min = Levinson(acovf, N, 1)
+    x0, V0 = calc_arma_initial(data, 1, arc_min, 0, [], sig2_min, acovf)
 
     # Levinson's algorithm
     print()
