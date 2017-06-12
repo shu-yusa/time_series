@@ -5,6 +5,7 @@ from scipy import optimize
 from scipy import linalg
 import scipy.signal as sig
 from statsmodels.tsa import stattools
+from timeseries import ar
 
 def yule_walker(N, acovf, maxm):
     """
@@ -279,7 +280,7 @@ if __name__ == "__main__":
     # Levinson's algorithm
     print()
     print("Levinson method")
-    mar, arc_min, sig2_min, AIC_min = Levinson(acovf, N, maxm)
+    mar, arc_min, sig2_min, AIC_min = ar.levinson(acovf, N, maxm)
     print('Best model: m=', mar)
     # スペクトル
     t, logp2 = calc_spectrum(400, arc_min, sig2_min)

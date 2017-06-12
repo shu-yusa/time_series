@@ -5,48 +5,8 @@ from scipy import optimize
 from scipy import linalg
 import scipy.signal as sig
 from statsmodels.tsa import stattools
-
-def Levinson(C, N, maxm):
-    """
-    @param C Autocovaiance function
-    @param N Data length
-    @param maxm Highest AR order
-    """
-    const = N * (np.log(2 * np.pi) + 1)
-    # matrix for auto regressive coefficients
-    a = np.zeros((maxm+1, maxm+1))
-    sig2 = np.zeros(maxm+1)
-    # covariance for the 0the order
-    sig2[0] = acovf[0]
-    # AIC
-    AIC = const + N * np.log(sig2[0]) + 2
-    parcor = np.zeros(maxm + 1)
-    parcor[0] = 0
-    # minimum
-    sig2_min = acovf[0]
-    arc_min = []
-    AIC_min = const + N * np.log(sig2_min) + 2 * (maxm + 1)
-    mar = 0
-    # calculate AR model upto maxm
-    print("m=", 0, "sig=", sig2[0], "AIC=", AIC)
-    for m in range(1, maxm + 1):
-        parcor[m] = acovf[m]
-        for j in range(1, m):
-            parcor[m] -= a[m-2,j-1] * acovf[m-j]
-        parcor[m] /= sig2[m-1]
-        a[m-1,m-1] = parcor[m]
-        for i in range(1, m):
-            a[m-1,i-1] = a[m-2,i-1] - a[m-1,m-1] * a[m-2,m-i-1]
-        sig2[m] = sig2[m-1] * (1 - a[m-1,m-1]**2)
-        AIC = const + N * np.log(sig2[m]) + 2 * (m + 1)
-        print("m=", m, "parcor=", parcor[m], "sig=", sig2[m], "AIC=", AIC)
-        # AIC最小値を更新
-        if AIC < AIC_min:
-            AIC_min = AIC
-            sig2_min = sig2[m]
-            arc_min = a[m-1,:m]
-            mar = m
-    return mar, arc_min, sig2_min, AIC_min
+from timeseries import ar
+from timeseries import arma
 
 def calc_spectrum(ngrid, arc, sig2):
     """
@@ -134,11 +94,7 @@ def calc_arma_initial(data, m, arc, l, bac, sig2, acovf):
     x0 = np.zeros(k)
     V0 = np.zeros((k, k))
     V0[0,0] = acovf[0]
-    g = np.zeros(l)
-    g[0] = 1
-    g[i] = - bac[i]
-    for j in range(i):
-        g[i] += arc[j] * g[i-j]
+    g = arma.impulse(m, l, arc, bac, l)
 
     for i in range(1,k):
         for j in range(i,m):
@@ -242,7 +198,7 @@ if __name__ == "__main__":
     plt.figure(1)
     plt.clf()
 
-    maxm = 25
+    maxm = 5
 
     # 太陽黒点数
     with open('sunspot.txt', encoding='utf-8') as f:
@@ -252,57 +208,51 @@ if __name__ == "__main__":
     # 対数値に変換
     data = np.log10(data)
     # 平均を引く
-    data = data - np.mean(data)
+    mean = np.mean(data)
+    data = data - mean
     # 自己共分散関数
     acovf = stattools.acovf(data)
 
-    mar, arc_min, sig2_min, AIC_min = Levinson(acovf, N, 1)
-    x0, V0 = calc_arma_initial(data, 1, arc_min, 0, [], sig2_min, acovf)
 
     # Levinson's algorithm
     print()
     print("Levinson method")
-    mar, arc_min, sig2_min, AIC_min = Levinson(acovf, N, maxm)
+    mar, arc_min, sig2_min, AIC_min = ar.levinson(acovf, N, maxm)
     print('Best model: m=', mar)
     print('AR coefficiants:', arc_min)
-    # スペクトル
-    t, logp2 = calc_spectrum(400, arc_min, sig2_min)
-    y_pre2 = calc_time_series(data, arc_min, N, mar)
-
     # kalman filter
-    data_trim = data[:120]
-    x, F, G, H, Q, R = make_ar_model(data_trim, mar, arc_min, sig2_min)
-    x0 = np.zeros(x.shape[1])
-    V0 = np.zeros((x.shape[1], x.shape[1]))
-    y = np.zeros((data_trim.shape[0], 1))
-    y[:,0] = data_trim
-    xc, Vc = kalman_filter(x, y, F, G, H, Q, R, x0, V0, [41], [30])
-    yc, dp = predict(xc, Vc, F, G, H, Q, R, len(data_trim), 1, N - len(data_trim))
+    x0, V0 = calc_arma_initial(data, 1, arc_min, 0, [], sig2_min, acovf)
+    x, F, G, H, Q, R = make_ar_model(data, mar, arc_min, sig2_min)
+    y = np.zeros((data.shape[0], 1))
+    y[:,0] = data
+    xc, Vc = kalman_filter(x, y, F, G, H, Q, R, x0, V0)
+
+    yc, dp = predict(xc, Vc, F, G, H, Q, R, len(data), 1, N - len(data))
     xc, Vc = smooth(xc, Vc, F)
-    ym, dm = interpolate(xc, Vc, H, R, len(data_trim), 1)
+    ym, dm = interpolate(xc, Vc, H, R, len(data), 1)
 
     # プロット
-    plt.subplot(2,1,1)
-    plt.plot(t, logp2, label="Yule-Walker")
-    plt.legend()
+    # plt.subplot(2,1,1)
+    # plt.plot(t, logp2, label="Yule-Walker")
+    # plt.legend()
 
-    # 時系列計算
-    t = range(N)
-    plt.subplot(2,1,2)
-    # plt.plot(t, y_pre2 + mean, label="Yule-Walker")
-    t = range(len(data_trim))
-    plt.plot(t, data_trim + mean, label="Data")
-    # interpolation
-    t = range(41, 71)
-    plt.plot(t, ym[41:71] + mean, label="interpolation")
-    plt.plot(t, ym[41:71] + np.sqrt(dm[41:71]) + mean)
-    plt.plot(t, ym[41:71] - np.sqrt(dm[41:71]) + mean)
-    t = range(len(data_trim) - 1, len(data_trim) - 1 + len(yc))
-    plt.plot(t, data[len(data_trim)-1:N] + mean, "o", label="Data")
-    plt.plot(t, yc + mean, label="prediction")
-    plt.plot(t, yc + np.sqrt(dp) + mean)
-    plt.plot(t, yc - np.sqrt(dp) + mean)
+    #  # 時系列計算
+    #  t = range(N)
+    #  plt.subplot(2,1,2)
+    #  # plt.plot(t, y_pre2 + mean, label="Yule-Walker")
+    #  t = range(len(data))
+    #  plt.plot(t, data + mean, label="Data")
+    #  # interpolation
+    #  t = range(41, 71)
+    #  plt.plot(t, ym[41:71] + mean, label="interpolation")
+    #  plt.plot(t, ym[41:71] + np.sqrt(dm[41:71]) + mean)
+    #  plt.plot(t, ym[41:71] - np.sqrt(dm[41:71]) + mean)
+    #  t = range(len(data) - 1, len(data) - 1 + len(yc))
+    #  plt.plot(t, data[len(data)-1:N] + mean, "o", label="Data")
+    #  plt.plot(t, yc + mean, label="prediction")
+    #  plt.plot(t, yc + np.sqrt(dp) + mean)
+    #  plt.plot(t, yc - np.sqrt(dp) + mean)
 
-    plt.legend(loc="lower left")
-    plt.show()
+    #  plt.legend(loc="lower left")
+    #  plt.show()
 
