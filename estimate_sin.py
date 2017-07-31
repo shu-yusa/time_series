@@ -5,43 +5,6 @@ from scipy import optimize
 from scipy import linalg
 import scipy.signal as sig
 from statsmodels.tsa import stattools
-from timeseries import ar
-
-def yule_walker(N, acovf, maxm):
-    """
-    @param N the number of data
-    @param acovf auto covariance function
-    @param m the order of the AR model
-    @return mar, arc, sig, AIC auto regression coefficient, variance, AIC
-    """
-    const = N * (np.log(2 * np.pi) + 1)
-    sig2_min = acovf[0]
-    arc_min = []
-    AIC_min = const + N * np.log(sig2_min) + 2 * (maxm + 1)
-    mar = 0
-    for m in range(1, maxm+1):
-        # 自己共分散関数の行列を作成
-        C = []
-        for k in range(m):
-            row = np.append(np.zeros(k), acovf[:m-k])
-            C.append(row)
-        C = np.array(C)
-
-        # 右辺
-        b = acovf[1:m+1]
-        # 自己回帰係数
-        arc = linalg.solve(C, b, sym_pos=True)
-        # 分散
-        sig2 = acovf[0] - np.dot(arc, b)
-        # AIC
-        AIC = const + N * np.log(sig2) + 2 * (m + 1)
-        print("m=", m, "sig2=", sig2, "AIC=", AIC)
-        if AIC < AIC_min:
-            AIC_min = AIC
-            sig2_min = sig2
-            arc_min = arc
-            mar = m
-    return mar, arc_min, sig2_min, AIC_min
 
 def Levinson(C, N, maxm):
     """
@@ -69,19 +32,19 @@ def Levinson(C, N, maxm):
     for m in range(1, maxm + 1):
         parcor[m] = acovf[m]
         for j in range(1, m):
-            parcor[m] -= a[m-2][j-1] * acovf[m-j]
+            parcor[m] -= a[m-2,j-1] * acovf[m-j]
         parcor[m] /= sig2[m-1]
-        a[m-1][m-1] = parcor[m]
+        a[m-1,m-1] = parcor[m]
         for i in range(1, m):
-            a[m-1][i-1] = a[m-2][i-1] - a[m-1][m-1] * a[m-2][m-i-1]
-        sig2[m] = sig2[m-1] * (1 - a[m-1][m-1]**2)
+            a[m-1,i-1] = a[m-2,i-1] - a[m-1,m-1] * a[m-2,m-i-1]
+        sig2[m] = sig2[m-1] * (1 - a[m-1,m-1]**2)
         AIC = const + N * np.log(sig2[m]) + 2 * (m + 1)
         print("m=", m, "parcor=", parcor[m], "sig=", sig2[m], "AIC=", AIC)
         # AIC最小値を更新
         if AIC < AIC_min:
             AIC_min = AIC
             sig2_min = sig2[m]
-            arc_min = a[m-1]
+            arc_min = a[m-1,:m]
             mar = m
     return mar, arc_min, sig2_min, AIC_min
 
@@ -249,78 +212,172 @@ def calc_time_series(data, arc, N, m):
         y_pre.append(yk)
     return y_pre
 
+def make_ar_model(data, m, arc, sig2):
+    """
+    Represent AR model in a state space representation.
+    @param data data
+    @param m AR order
+    @param arc Auto-regressive coefficient
+    @param sig2 variance
+    """
+    ndata = len(data)
+    k = m
+    l = 1
+    x = np.zeros([ndata, k])
+    for n in range(ndata):
+        x[n,0] = data[n]
+        for i in range(1, k):
+            s = 0
+            for j in range(i, m):
+                s += arc[j] * data[n+i-j]
+            x[n,i] = s
+    F = np.zeros((k,k))
+    for i in range(k-1):
+        F[i,0] = arc[i]
+        F[i,i+1] = 1
+    F[k-1,0] = arc[k-1]
+    G = np.zeros([k,1])
+    G[0,0] = 1
+    H = np.zeros([l,k])
+    H[0,0] = 1
+    Q = np.zeros((1,1))
+    Q[0,0] = sig2
+    R = np.zeros((l,l))
+    return x, F, G, H, Q, R
+
+def kalman_filter(x, y, F, G, H, Q, R, x0, V0, missing=[], num_missed=[]):
+    ndata = x.shape[0]
+    shape = x.shape
+    xc = np.zeros((ndata, ndata, shape[1]))
+    Vc = np.zeros((ndata, ndata, shape[1], shape[1]))
+    xc[0,0,:] = x0
+    Vc[0,0,:,:] = V0
+    GQGT = G @ Q @ G.T
+    outlier_min = -1.0e30
+    outlier_max = 1.0e30
+    for i in range(len(missing)):
+        for k in range(num_missed[i]):
+            y[missing[i]:missing[i]+k,0] = outlier_min
+    for n in range(1, ndata):
+        xc[n,n-1,:] = F @ xc[n-1,n-1,:]
+        Vc[n,n-1,:,:] = F @ Vc[n-1,n-1,:,:] @ F.T + GQGT
+        VHT = Vc[n,n-1,:,:] @ H.T
+        if y[n,0] > outlier_min and y[n,0] < outlier_max:
+            K = VHT @ linalg.inv(H @ VHT + R)
+            xc[n,n,:] = xc[n,n-1,:] + K @ (y[n,:] - H @ xc[n,n-1,:])
+            Vc[n,n,:,:] = Vc[n,n-1,:,:] - K @ VHT.T
+        else:
+            xc[n,n,:] = xc[n,n-1,:]
+            Vc[n,n,:,:] = Vc[n,n-1,:,:]
+    return xc, Vc
+
+def predict(xc, Vc, F, G, H, Q, R, ndata, dim, p_len):
+    Vp = np.zeros([p_len+1, Vc.shape[2], Vc.shape[3]])
+    xp = np.zeros([p_len+1, xc.shape[2]])
+    xp[0,:] = xc[ndata-1,ndata-1,:]
+    Vp[0,:,:] = Vc[ndata-1,ndata-1,:,:]
+    GQGT = G @ Q @ G.T
+    for n in range(ndata, ndata + p_len):
+        xp[n-ndata+1,:] = F @ xp[n-ndata,:]
+        Vp[n-ndata+1,:,:] = F @ Vp[n-ndata,:,:] @ F.T + GQGT
+    yp = np.zeros([p_len+1, dim])
+    dp = np.zeros([p_len+1, dim])
+    for j in range(p_len+1):
+        yp[j,:] = H @ xp[j,:]
+        dp[j,:] = H @ Vp[j,:,:] @ H.T + R
+    return yp, dp
+
+def smooth(xc, Vc, F):
+    ndata = xc.shape[0]
+    m = Vc.shape[2]
+    A = np.zeros(F.shape)
+    for n in range(ndata - 1)[::-1]:
+        invertable = False
+        for k in range(m):
+            if Vc[n+1,n,k,k] > 1.0e-12:
+                invertable = True
+                break
+        A = Vc[n,n,:,:] @ F.T @ linalg.pinv(Vc[n+1,n,:,:])
+        xc[n,ndata-1,:] = xc[n,n,:] + A @ (xc[n+1,ndata-1,:] - xc[n+1,n,:])
+        Vc[n,ndata-1,:,:] = Vc[n,n,:,:] + \
+                A @ (Vc[n+1,ndata-1,:,:] - Vc[n+1,n,:,:]) @ A.T
+        for k in range(m):
+            if Vc[n,ndata-1,k,k] < 0:
+                Vc[n,ndata-1,k,k] = 0
+    return xc, Vc
+
+def interpolate(xc, Vc, H, R, ndata, dim):
+    ym = np.zeros([ndata, dim])
+    dm = np.zeros([ndata, dim])
+    for n in range(ndata):
+        ym[n,:] = H @ xc[n,ndata-1,:]
+        dm[n,:] = H @ Vc[n,ndata-1,:,:] @ H.T + R
+    return ym, dm
+
 if __name__ == "__main__":
     plt.figure(1)
     plt.clf()
 
-    maxm = 15
+    maxm = 11
 
     # 太陽黒点数
-    with open('sunspot.txt', encoding='utf-8') as f:
+    with open('sin.txt', encoding='utf-8') as f:
         data = np.array([float(k) for k in f.readlines()])
     # データ数
+    data_org = data
+    N_org = len(data)
+    # data = data[:24]
     N = len(data)
-    # 対数値に変換
-    #data = np.log10(data)
     # 平均を引く
-    data = data - np.mean(data)
+    mean = np.mean(data)
+    data = data - mean
     # 自己共分散関数
     acovf = stattools.acovf(data)
+    print(acovf)
     # acovf = acovf * (N - 1) / N
 
-    # 連立方程式を直接解く方法
-    """
-    print("Yule-Walker")
-    mar, arc_min, sig2_min, AIC_min = yule_walker(N, acovf, maxm)
-    print('Best model: m=', mar)
-    # スペクトル
-    t, logp1 = calc_spectrum(200, arc_min, sig2_min)
-    """
-
-    # Levinson's algorithm
-    print()
-    print("Levinson method")
-    mar, arc_min, sig2_min, AIC_min = ar.levinson(acovf, N, maxm)
-    print('Best model: m=', mar)
-    # スペクトル
-    t, logp2 = calc_spectrum(400, arc_min, sig2_min)
-    y_pre2 = calc_time_series(data, arc_min, N, mar)
-    print(arc_min)
-
-    ## least square ##
-    print()
-    print("Least squre method")
-    mar, arc_min, sig2_min, AIC_min = ar_least_square(data, N, maxm)
-    print('Best model: m=', mar)
-    # スペクトル
-    t, logp3 = calc_spectrum(400, arc_min, sig2_min)
-    y_pre3 = calc_time_series(data, arc_min, N, mar)
-
-    ## PARCOR method ##
     print()
     print("PARCOR method")
-    method = 3
-    mar, arc_min, sig2_min, AIC_min = parcor(data, N, maxm, method)
+    method = 2
+    # mar, arc_min, sig2_min, AIC_min = parcor(data[:24], 24, maxm, method)
+    mar, arc_min, sig2_min, AIC_min = Levinson(acovf, 24, maxm)
+    #mar, arc_min, sig2_min, AIC_min = ar_least_square(data[:24], 24, maxm)
     print('Best model: m=', mar)
+    print('AR coefficiants:', arc_min)
     # スペクトル
-    t, logp4 = calc_spectrum(400, arc_min, sig2_min)
-    y_pre4 = calc_time_series(data, arc_min, N, mar)
+    t, logp2 = calc_spectrum(400, arc_min, sig2_min)
+    y_pre2 = calc_time_series(data, arc_min, 24, mar)
+
+    # kalman filter
+    data_trim = data[:24]
+    x, F, G, H, Q, R = make_ar_model(data_trim, mar, arc_min, sig2_min)
+    x0 = np.zeros(x.shape[1])
+    V0 = np.zeros((x.shape[1], x.shape[1]))
+    y = np.zeros((data_trim.shape[0], 1))
+    y[:,0] = data_trim
+    xc, Vc = kalman_filter(x, y, F, G, H, Q, R, x0, V0)
+    yc, dp = predict(xc, Vc, F, G, H, Q, R, len(data_trim), 1, N - len(data_trim))
+    xc, Vc = smooth(xc, Vc, F)
+    ym, dm = interpolate(xc, Vc, H, R, len(data_trim), 1)
 
     # プロット
     plt.subplot(2,1,1)
-    plt.plot(t, logp2, label="Yule-Walker")
-    plt.plot(t, logp3, label="Least Square")
-    plt.plot(t, logp4, label="PARCOR")
+    plt.plot(t, logp2, label="PARCOR")
     plt.legend()
 
     # 時系列計算
     t = range(N)
     plt.subplot(2,1,2)
-    plt.plot(t, y_pre2, label="Yule-Walker")
-    plt.plot(t, y_pre3, label="Least Square")
-    plt.plot(t, y_pre4, label="PARCOR")
-    plt.plot(t, data, label="Data")
-    plt.legend(loc="best")
+    # plt.plot(t, y_pre2 + mean, label="Yule-Walker")
+    t = range(len(data_trim))
+    plt.plot(t, data_trim + mean, label="Data")
+    # prediction
+    t = range(len(data_trim) - 1, len(data_trim) - 1 + len(yc))
+    plt.plot(t, data[len(data_trim)-1:N] + mean, ":", label="sin")
+    plt.plot(t, yc + mean, label="prediction")
+    plt.plot(t, yc + np.sqrt(dp) + mean, "--", label="+1σ")
+    plt.plot(t, yc - np.sqrt(dp) + mean, "--",label="-1σ")
 
+    plt.legend(loc="lower left")
     plt.show()
 

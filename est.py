@@ -253,29 +253,20 @@ if __name__ == "__main__":
     plt.figure(1)
     plt.clf()
 
-    maxm = 15
+    maxm = 10
 
     # 太陽黒点数
-    with open('sunspot.txt', encoding='utf-8') as f:
+    with open('sin.txt', encoding='utf-8') as f:
         data = np.array([float(k) for k in f.readlines()])
     # データ数
+    data = data[:24]
     N = len(data)
-    # 対数値に変換
-    #data = np.log10(data)
     # 平均を引く
     data = data - np.mean(data)
     # 自己共分散関数
     acovf = stattools.acovf(data)
     # acovf = acovf * (N - 1) / N
 
-    # 連立方程式を直接解く方法
-    """
-    print("Yule-Walker")
-    mar, arc_min, sig2_min, AIC_min = yule_walker(N, acovf, maxm)
-    print('Best model: m=', mar)
-    # スペクトル
-    t, logp1 = calc_spectrum(200, arc_min, sig2_min)
-    """
 
     # Levinson's algorithm
     print()
@@ -285,7 +276,6 @@ if __name__ == "__main__":
     # スペクトル
     t, logp2 = calc_spectrum(400, arc_min, sig2_min)
     y_pre2 = calc_time_series(data, arc_min, N, mar)
-    print(arc_min)
 
     ## least square ##
     print()
@@ -299,6 +289,9 @@ if __name__ == "__main__":
     ## PARCOR method ##
     print()
     print("PARCOR method")
+    print("N=", N)
+    print("maxm=", maxm)
+    print(data)
     method = 3
     mar, arc_min, sig2_min, AIC_min = parcor(data, N, maxm, method)
     print('Best model: m=', mar)
